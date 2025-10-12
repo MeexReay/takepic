@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	_ "embed"
 	"fmt"
-	// "io"
 	"os"
+	"time"
 
+	"image"
 	"image/jpeg"
 
 	"golang.org/x/image/bmp"
@@ -84,15 +86,44 @@ func updateFrames() {
 	}
 }
 
-// func loadYuyv
+type SubImager interface {
+	SubImage(r image.Rectangle) image.Image
+}
+
+func getFrame() image.Image {
+	height := int(min(size[0], size[1]))
+	width := height
+	offset_x := (int(size[0]) - width) / 2
+	offset_y := (int(size[1]) - height) / 2
+
+	src, err := jpeg.Decode(bytes.NewReader(frame))
+	if err != nil {
+		return nil
+	}
+
+	cropSize := image.Rect(
+		offset_x,
+		offset_y,
+		offset_x+width,
+		offset_y+height,
+	)
+	croppedImage := src.(SubImager).SubImage(cropSize)
+
+	return croppedImage
+}
+
+//go:embed mask.bmp
+var mask_bytes []byte
 
 func main() {
 	initCamera()
 
 	go updateFrames()
 
+	defer camera.StopStreaming()
 	defer camera.Close()
 
+	// SDL3 window below
 	defer binsdl.Load().Unload() // sdl.LoadLibrary(sdl.Path())
 	defer sdl.Quit()
 
@@ -107,25 +138,74 @@ func main() {
 	defer renderer.Destroy()
 	defer window.Destroy()
 
+	mask_bmpStream, err := sdl.IOFromBytes(mask_bytes)
+	if err != nil {
+		panic(err)
+	}
+
+	mask_surface, err := sdl.LoadBMP_IO(mask_bmpStream, true)
+	if err != nil {
+		panic(err)
+	}
+
+	mask_texture, err := renderer.CreateTextureFromSurface(mask_surface)
+	if err != nil {
+		panic(err)
+	}
+
+	mask_texture.SetAlphaMod(64)
+
 	renderer.SetDrawColor(255, 255, 255, 255)
 
+	var draw_mask = false
+
 	sdl.RunLoop(func() error {
+
+		src := getFrame()
+
 		var event sdl.Event
 
 		for sdl.PollEvent(&event) {
 			if event.Type == sdl.EVENT_QUIT {
 				return sdl.EndLoop
-			}
-		}
+			} else if event.Type == sdl.EVENT_KEY_DOWN {
+				if event.KeyboardEvent().Key == sdl.K_RETURN {
+					draw_mask = true
+				}
+			} else if event.Type == sdl.EVENT_KEY_UP {
+				if event.KeyboardEvent().Key == sdl.K_RETURN {
+					draw_mask = false
 
-		image, err := jpeg.Decode(bytes.NewReader(frame))
-		if err != nil {
-			return err
+					dirname, err := os.UserHomeDir()
+					if err != nil {
+						panic(err)
+					}
+
+					filename := dirname + "/Pictures/takepic/" + time.Now().Format("2006-01-02") + ".jpg"
+
+					buffer := bytes.NewBuffer([]byte{})
+
+					err = jpeg.Encode(buffer, src, &jpeg.Options{
+						Quality: 100,
+					})
+					if err != nil {
+						panic(err)
+					}
+
+					os.MkdirAll(dirname+"/Pictures/takepic", 0755)
+					os.WriteFile(filename, buffer.Bytes(), 0666)
+
+					continue
+				}
+			}
 		}
 
 		buffer := bytes.NewBuffer([]byte{})
 
-		err = bmp.Encode(buffer, image)
+		err = bmp.Encode(buffer, src)
+		if err != nil {
+			panic(err)
+		}
 
 		bmpStream, err := sdl.IOFromBytes(buffer.Bytes())
 		if err != nil {
@@ -144,13 +224,22 @@ func main() {
 
 		var dstRect sdl.FRect
 
-		dstRect.X = float32(720-texture.W) / 2
-		dstRect.Y = float32(720-texture.H) / 2
-		dstRect.W = float32(texture.W)
-		dstRect.H = float32(texture.H)
+		dstRect.X = float32(0)
+		dstRect.Y = float32(0)
+		dstRect.W = float32(720)
+		dstRect.H = float32(720)
+
 		renderer.RenderTexture(texture, nil, &dstRect)
 
-		renderer.DebugText(50, 50, "Hello world")
+		renderer.SetDrawColor(0, 0, 0, 255)
+		renderer.DebugText(2, 2, time.Now().String())
+		renderer.SetDrawColor(255, 255, 255, 255)
+		renderer.DebugText(0, 0, time.Now().String())
+
+		if draw_mask {
+			renderer.RenderTexture(mask_texture, nil, &dstRect)
+		}
+
 		renderer.Present()
 
 		return nil
